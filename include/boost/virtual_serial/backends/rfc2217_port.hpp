@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -185,6 +186,7 @@ public:
         queue_.clear_terminal();
         decoder_.reset();
         configured_ = false;
+        answered_ = 0;
         will_sent_ = false;
         do_sent_ = false;
         suspended_ = false;
@@ -197,6 +199,21 @@ public:
             detail::telnet::command_do, detail::telnet::option_com_port, ec);
         if (ec)
             return;
+
+        // As a client of a serial line over Telnet does: binary both ways, and
+        // no go-ahead.  A server that does not know them refuses.
+        for (const unsigned char option :
+             {detail::telnet::option_binary,
+              detail::telnet::option_suppress_go_ahead})
+        {
+            send_negotiation(detail::telnet::command_will, option, ec);
+            if (ec)
+                return;
+            send_negotiation(detail::telnet::command_do, option, ec);
+            if (ec)
+                return;
+        }
+        binary_local_ = binary_remote_ = sga_local_ = sga_remote_ = true;
 
         apply_options(config_, ec);
     }
@@ -325,6 +342,7 @@ public:
 
         if (!socket_.is_open())
         {
+            std::lock_guard<std::mutex> lock(config_mutex_);
             config_ = candidate;
             ec.clear();
             return;
@@ -333,24 +351,42 @@ public:
         const bool send_all = !configured_;
         std::vector<std::vector<unsigned char> > commands;
 
-        if (send_all || candidate.baud_rate != config_.baud_rate)
-            commands.push_back(detail::telnet::make_baud_rate(candidate.baud_rate));
-        if (send_all || candidate.data_bits != config_.data_bits)
-            commands.push_back(detail::telnet::make_rfc2217(
-                detail::telnet::rfc2217::set_data_size,
-                detail::telnet::data_size_index(candidate.data_bits)));
-        if (send_all || candidate.parity != config_.parity)
-            commands.push_back(detail::telnet::make_rfc2217(
-                detail::telnet::rfc2217::set_parity,
-                detail::telnet::parity_index(candidate.parity)));
-        if (send_all || candidate.stop_bits != config_.stop_bits)
-            commands.push_back(detail::telnet::make_rfc2217(
-                detail::telnet::rfc2217::set_stop_size,
-                detail::telnet::stop_size_index(candidate.stop_bits)));
-        if (send_all || candidate.flow_control != config_.flow_control)
-            commands.push_back(detail::telnet::make_rfc2217(
-                detail::telnet::rfc2217::set_control,
-                detail::telnet::control_index(candidate.flow_control)));
+        if (send_all && candidate.device_settings)
+        {
+            // The server's port belongs to the server: ask what it has (the
+            // request form of each command is the value zero) and take the
+            // answers, which handle_subnegotiation stores in config_.
+            namespace tn = detail::telnet;
+            commands.push_back(tn::make_baud_rate(0));
+            commands.push_back(tn::make_rfc2217(tn::rfc2217::set_data_size, 0));
+            commands.push_back(tn::make_rfc2217(tn::rfc2217::set_parity, 0));
+            commands.push_back(tn::make_rfc2217(tn::rfc2217::set_stop_size, 0));
+            commands.push_back(tn::make_rfc2217(
+                tn::rfc2217::set_control, tn::rfc2217::control_request_flow));
+        }
+        else
+        {
+
+            if (send_all || candidate.baud_rate != config_.baud_rate)
+                commands.push_back(detail::telnet::make_baud_rate(candidate.baud_rate));
+            if (send_all || candidate.data_bits != config_.data_bits)
+                commands.push_back(detail::telnet::make_rfc2217(
+                    detail::telnet::rfc2217::set_data_size,
+                    detail::telnet::data_size_index(candidate.data_bits)));
+            if (send_all || candidate.parity != config_.parity)
+                commands.push_back(detail::telnet::make_rfc2217(
+                    detail::telnet::rfc2217::set_parity,
+                    detail::telnet::parity_index(candidate.parity)));
+            if (send_all || candidate.stop_bits != config_.stop_bits)
+                commands.push_back(detail::telnet::make_rfc2217(
+                    detail::telnet::rfc2217::set_stop_size,
+                    detail::telnet::stop_size_index(candidate.stop_bits)));
+            if (send_all || candidate.flow_control != config_.flow_control)
+                commands.push_back(detail::telnet::make_rfc2217(
+                    detail::telnet::rfc2217::set_control,
+                    detail::telnet::control_index(candidate.flow_control)));
+
+        }
 
         if (send_all)
         {
@@ -365,7 +401,10 @@ public:
                     | detail::telnet::line_state::break_detect)));
         }
 
-        config_ = candidate;
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            config_ = candidate;
+        }
         configured_ = true;
 
         for (std::size_t i = 0; i < commands.size(); ++i)
@@ -380,7 +419,18 @@ public:
 
     serial_config options() const
     {
+        std::lock_guard<std::mutex> lock(config_mutex_);
         return config_;
+    }
+
+    /// True once options() says what the server's port has: always when the
+    /// client set the settings itself, and in `device_settings` mode after the
+    /// server has answered the baud rate, data size, parity and stop size
+    /// requests.
+    bool settings_known() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        return !config_.device_settings || answered_ == 0x0F;
     }
 
     /// Sends `BREAK` on (true) or off (false).
@@ -589,6 +639,8 @@ private:
         boost::asio::write(socket_, boost::asio::buffer(bytes), ec);
         if (ec)
             return;
+        if (option != detail::telnet::option_com_port)
+            return;
         if (command == detail::telnet::command_will)
             will_sent_ = true;
         else if (command == detail::telnet::command_do)
@@ -610,6 +662,46 @@ private:
     void handle_negotiation(unsigned char command, unsigned char option)
     {
         boost::system::error_code ignored;
+        if (option == detail::telnet::option_binary
+            || option == detail::telnet::option_suppress_go_ahead)
+        {
+            // Both are what a Telnet server expects of a client that carries
+            // a serial line: binary so that CR is not changed into CR NUL,
+            // and no go-ahead.  Each side is answered once.
+            bool& local = option == detail::telnet::option_binary
+                ? binary_local_ : sga_local_;
+            bool& remote = option == detail::telnet::option_binary
+                ? binary_remote_ : sga_remote_;
+            if (command == detail::telnet::command_do)
+            {
+                if (!local)
+                    send_negotiation(
+                        detail::telnet::command_will, option, ignored);
+                local = true;
+            }
+            else if (command == detail::telnet::command_will)
+            {
+                if (!remote)
+                    send_negotiation(
+                        detail::telnet::command_do, option, ignored);
+                remote = true;
+            }
+            else if (command == detail::telnet::command_dont)
+            {
+                if (local)
+                    send_negotiation(
+                        detail::telnet::command_wont, option, ignored);
+                local = false;
+            }
+            else if (command == detail::telnet::command_wont)
+            {
+                if (remote)
+                    send_negotiation(
+                        detail::telnet::command_dont, option, ignored);
+                remote = false;
+            }
+            return;
+        }
         if (option != detail::telnet::option_com_port)
         {
             // Refuse every other Telnet option: this is a raw byte pipe.
@@ -676,14 +768,22 @@ private:
                     | (static_cast<unsigned int>(body[2]) << 8)
                     | static_cast<unsigned int>(body[3]);
                 if (baud != 0)
+                {
+                    std::lock_guard<std::mutex> lock(config_mutex_);
                     config_.baud_rate = baud;
+                    answered_ |= 0x01;
+                }
             }
             break;
 
         case tn::rfc2217::set_data_size:
         case tn::rfc2217::set_data_size + tn::rfc2217::server_offset:
             if (body_size == 1 && body[0] >= 5 && body[0] <= 8)
+            {
+                std::lock_guard<std::mutex> lock(config_mutex_);
                 config_.data_bits = body[0];
+                answered_ |= 0x02;
+            }
             break;
 
         case tn::rfc2217::set_parity:
@@ -691,19 +791,28 @@ private:
             // Indices 1 through 5 are defined; anything else is ignored
             // rather than silently mapped onto a different parity.
             if (body_size == 1 && body[0] >= 1 && body[0] <= 5)
+            {
+                std::lock_guard<std::mutex> lock(config_mutex_);
                 config_.parity = tn::parity_from_index(body[0]);
+                answered_ |= 0x04;
+            }
             break;
 
         case tn::rfc2217::set_stop_size:
         case tn::rfc2217::set_stop_size + tn::rfc2217::server_offset:
             if (body_size == 1 && body[0] >= 1 && body[0] <= 3)
+            {
+                std::lock_guard<std::mutex> lock(config_mutex_);
                 config_.stop_bits = tn::stop_size_from_index(body[0]);
+                answered_ |= 0x08;
+            }
             break;
 
         case tn::rfc2217::set_control:
         case tn::rfc2217::set_control + tn::rfc2217::server_offset:
             if (body_size == 1)
             {
+                std::lock_guard<std::mutex> lock(config_mutex_);
                 if (body[0] == tn::rfc2217::control_no_flow)
                     config_.flow_control = flow_control_mode::none;
                 else if (body[0] == tn::rfc2217::control_xon_xoff)
@@ -782,6 +891,12 @@ private:
     unsigned char modem_state_ = 0;
     bool read_loop_active_ = false;
     bool configured_ = false;
+    mutable std::mutex config_mutex_;
+    unsigned answered_ = 0;
+    bool binary_local_ = false;
+    bool binary_remote_ = false;
+    bool sga_local_ = false;
+    bool sga_remote_ = false;
     bool will_sent_ = false;
     bool do_sent_ = false;
     bool suspended_ = false;
