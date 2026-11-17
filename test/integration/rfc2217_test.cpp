@@ -353,3 +353,66 @@ VS_TEST_CASE(rfc2217_through_any_serial_port)
         io, [&] { return server.received().size() >= 7; }));
     VS_CHECK_EQ(server.received(), std::string("through"));
 }
+
+VS_TEST_CASE(rfc2217_device_settings_asks_and_does_not_set)
+{
+    asio::io_context io;
+    vs_test::rfc2217_test_server server(io);
+    vs::serial_config config;
+    config.baud_rate = 115200;
+    config.parity = vs::parity_mode::even;
+    config.device_settings = true;
+    vs::rfc2217_port port(io.get_executor(), config);
+    server.start();
+    boost::system::error_code ec;
+    port.open("127.0.0.1:" + std::to_string(server.port()), ec);
+    VS_REQUIRE(!ec);
+    VS_REQUIRE(vs_test::pump_until(
+        io, [&] { return server.commands().size() >= 6; }));
+
+    // Every command is the request form (zero), none sets a value.
+    const std::vector<unsigned char>* baud =
+        server.find_command(telnet::rfc2217::set_baud_rate);
+    VS_REQUIRE(baud != nullptr);
+    VS_CHECK_EQ(baud->size(), 5u);
+    for (std::size_t i = 1; i < baud->size(); ++i)
+        VS_CHECK_EQ(static_cast<int>((*baud)[i]), 0);
+    for (const unsigned char code :
+         {telnet::rfc2217::set_data_size, telnet::rfc2217::set_parity,
+          telnet::rfc2217::set_stop_size, telnet::rfc2217::set_control})
+    {
+        const std::vector<unsigned char>* command = server.find_command(code);
+        VS_REQUIRE(command != nullptr);
+        VS_CHECK_EQ(static_cast<int>((*command)[1]), 0);
+    }
+
+    // The server answers with what its port has, and the client adopts it.
+    char sink[16] = {};
+    port.async_read_some(asio::buffer(sink),
+        [](boost::system::error_code, std::size_t) {});
+    server.send_server_ack(telnet::rfc2217::set_baud_rate, {0, 0, 0x25, 0x80});
+    server.send_server_ack(telnet::rfc2217::set_data_size, {7});
+    server.send_server_ack(telnet::rfc2217::set_parity, {3});
+    VS_CHECK(vs_test::pump_until(io, [&] {
+        const vs::serial_config now = port.options();
+        return now.baud_rate == 9600 && now.data_bits == 7
+            && now.parity == vs::parity_mode::even;
+    }));
+}
+
+VS_TEST_CASE(rfc2217_binary_and_suppress_go_ahead_are_accepted)
+{
+    rfc_fixture f;
+    VS_REQUIRE(f.wait_for_commands(6));
+    // The client offers both, and does not refuse them when the server does.
+    VS_CHECK(f.server.client_sent(telnet::command_will, telnet::option_binary));
+    VS_CHECK(f.server.client_sent(telnet::command_do, telnet::option_binary));
+    f.server.send_negotiation(telnet::command_do, telnet::option_binary);
+    f.server.send_negotiation(telnet::command_will, telnet::option_binary);
+    f.server.send_negotiation(telnet::command_do, telnet::option_suppress_go_ahead);
+    vs_test::pump_until(f.io, [] { return false; }, std::chrono::milliseconds(100));
+    VS_CHECK(!f.server.client_sent(telnet::command_wont, telnet::option_binary));
+    VS_CHECK(!f.server.client_sent(telnet::command_dont, telnet::option_binary));
+    VS_CHECK(!f.server.client_sent(
+        telnet::command_wont, telnet::option_suppress_go_ahead));
+}

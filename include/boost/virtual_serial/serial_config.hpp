@@ -188,6 +188,14 @@ struct serial_config
     /// Request exclusive access to the device where the platform supports
     /// it.
     bool exclusive = false;
+
+    /// Leave the line settings (baud rate, data bits, parity, stop bits and
+    /// flow control) to the device.  An RFC 2217 client then asks the server
+    /// for the settings it has, with the request form of each command (the
+    /// value zero), and adopts the answers, instead of imposing its own on the
+    /// server's real port.  The other backends ignore it.  In a URI,
+    /// `settings=device`.
+    bool device_settings = false;
 };
 
 /// Equality compares every field.
@@ -199,7 +207,8 @@ inline bool operator==(const serial_config& lhs, const serial_config& rhs) noexc
         && lhs.flow_control == rhs.flow_control
         && lhs.read_timeout == rhs.read_timeout
         && lhs.write_timeout == rhs.write_timeout
-        && lhs.exclusive == rhs.exclusive;
+        && lhs.exclusive == rhs.exclusive
+        && lhs.device_settings == rhs.device_settings;
 }
 
 inline bool operator!=(const serial_config& lhs, const serial_config& rhs) noexcept
@@ -495,6 +504,11 @@ inline serial_config parse_uri_impl(
             ok = parse_milliseconds(value, config.write_timeout);
         else if (key == "exclusive")
             ok = parse_bool(value, config.exclusive);
+        else if (key == "settings")
+        {
+            ok = value == "device" || value == "own";
+            config.device_settings = value == "device";
+        }
         else
         {
             ec = error::bad_target;
@@ -609,6 +623,8 @@ inline std::string to_uri(const serial_config& config)
         append("write_timeout", std::to_string(config.write_timeout.count()) + "ms");
     if (config.exclusive)
         append("exclusive", "1");
+    if (config.device_settings)
+        append("settings", "device");
 
     return result;
 }
