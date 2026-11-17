@@ -11,6 +11,16 @@ Run `python tools/changelog.py --dry-run` to preview the section below.
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-11-17
+
+### Added
+
+- **An RFC 2217 client can leave the serial settings to the server.** With `settings=device` in the URI (`device_settings` in `serial_config`) the client asks the server for its baud rate, data size, parity, stop size and flow control (each command with the value zero) and adopts the answers, instead of setting its own on the server's real port. `rfc2217_port::settings_known()` says when the answers are in. The client also takes part in the Telnet binary and suppress-go-ahead options, which a server of a serial line expects, and no longer refuses them.
+
+### Changed
+
+- The commit authorship check accepts the maintainer's GitHub noreply address as well as the maintainer's own address, so squash merges made on GitHub pass it.
+
 ## [0.1.0-beta.2] - 2026-11-05
 
 ### Fixed
@@ -63,6 +73,7 @@ Run `python tools/changelog.py --dry-run` to preview the section below.
 - A Telnet `DONT` for the com port option now resets both halves of the negotiation, so a later `WILL` is answered with `DO` again.
 - Queued mock operations now register `io_context` work, so `io_context::run()` no longer returns while a read or a delayed write is still outstanding.
 
-[Unreleased]: https://github.com/iainchesworth/virtual-serial/compare/v0.1.0-beta.2...HEAD
+[Unreleased]: https://github.com/iainchesworth/virtual-serial/compare/v0.1.0-beta.3...HEAD
+[0.1.0-beta.3]: https://github.com/iainchesworth/virtual-serial/releases/tag/v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/iainchesworth/virtual-serial/releases/tag/v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/iainchesworth/virtual-serial/releases/tag/v0.1.0-beta.1

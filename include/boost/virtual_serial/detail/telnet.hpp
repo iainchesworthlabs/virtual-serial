@@ -31,6 +31,10 @@ constexpr unsigned char command_do = 253;
 constexpr unsigned char command_dont = 254;
 constexpr unsigned char command_iac = 255;
 
+/// Telnet options a serial line over Telnet uses (RFC 856 and RFC 858).
+constexpr unsigned char option_binary = 0;
+constexpr unsigned char option_suppress_go_ahead = 3;
+
 /// Telnet option number for RFC 2217 com port control.
 constexpr unsigned char option_com_port = 44;
 

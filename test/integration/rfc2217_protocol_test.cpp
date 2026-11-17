@@ -186,9 +186,9 @@ VS_TEST_CASE(rfc2217_negotiation_refuses_unrelated_options)
     VS_CHECK(vs_test::pump_until(
         f.io, [&] { return f.server.client_sent(telnet::command_wont, 1); }));
 
-    f.server.send_negotiation(telnet::command_will, 3);
+    f.server.send_negotiation(telnet::command_will, 1);
     VS_CHECK(vs_test::pump_until(
-        f.io, [&] { return f.server.client_sent(telnet::command_dont, 3); }));
+        f.io, [&] { return f.server.client_sent(telnet::command_dont, 1); }));
 }
 
 VS_TEST_CASE(rfc2217_negotiation_dont_disables_will)
