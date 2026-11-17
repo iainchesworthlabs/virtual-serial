@@ -416,3 +416,65 @@ VS_TEST_CASE(rfc2217_binary_and_suppress_go_ahead_are_accepted)
     VS_CHECK(!f.server.client_sent(
         telnet::command_wont, telnet::option_suppress_go_ahead));
 }
+
+VS_TEST_CASE(rfc2217_binary_and_suppress_go_ahead_can_be_withdrawn_and_offered_again)
+{
+    rfc_fixture f;
+    VS_REQUIRE(f.wait_for_commands(6));
+    // The client only handles what the server sends while a read is pending.
+    char sink[16] = {};
+    f.port.async_read_some(asio::buffer(sink),
+        [](boost::system::error_code, std::size_t) {});
+    for (const unsigned char option :
+         {telnet::option_binary, telnet::option_suppress_go_ahead})
+    {
+        // Withdrawing either side is answered, once.
+        f.server.send_negotiation(telnet::command_dont, option);
+        f.server.send_negotiation(telnet::command_wont, option);
+        VS_CHECK(vs_test::pump_until(f.io, [&] {
+            return f.server.client_sent(telnet::command_wont, option)
+                && f.server.client_sent(telnet::command_dont, option);
+        }));
+        // A repeat of the same withdrawal is not answered again.
+        f.server.send_negotiation(telnet::command_dont, option);
+        f.server.send_negotiation(telnet::command_wont, option);
+        // Offering it again is accepted.
+        f.server.send_negotiation(telnet::command_do, option);
+        f.server.send_negotiation(telnet::command_will, option);
+        vs_test::pump_until(
+            f.io, [] { return false; }, std::chrono::milliseconds(100));
+    }
+    VS_CHECK(f.port.is_open());
+}
+
+VS_TEST_CASE(rfc2217_device_settings_are_known_once_all_four_are_answered)
+{
+    asio::io_context io;
+    vs_test::rfc2217_test_server server(io);
+    vs::serial_config config;
+    config.device_settings = true;
+    vs::rfc2217_port port(io.get_executor(), config);
+    server.start();
+    boost::system::error_code ec;
+    port.open("127.0.0.1:" + std::to_string(server.port()), ec);
+    VS_REQUIRE(!ec);
+    VS_REQUIRE(vs_test::pump_until(
+        io, [&] { return server.commands().size() >= 6; }));
+    VS_CHECK(!port.settings_known());
+
+    char sink[16] = {};
+    port.async_read_some(asio::buffer(sink),
+        [](boost::system::error_code, std::size_t) {});
+    server.send_server_ack(telnet::rfc2217::set_baud_rate, {0, 0, 0x25, 0x80});
+    server.send_server_ack(telnet::rfc2217::set_data_size, {8});
+    server.send_server_ack(telnet::rfc2217::set_parity, {1});
+    vs_test::pump_until(io, [] { return false; }, std::chrono::milliseconds(100));
+    // Three of the four answers are not enough.
+    VS_CHECK(!port.settings_known());
+    server.send_server_ack(telnet::rfc2217::set_stop_size, {1});
+    VS_CHECK(vs_test::pump_until(io, [&] { return port.settings_known(); }));
+
+    // A client that sets its own settings always knows them.
+    rfc_fixture own;
+    VS_CHECK(own.port.settings_known());
+}
